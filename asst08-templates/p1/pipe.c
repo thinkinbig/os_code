@@ -21,9 +21,6 @@ int run_program(char *file_path, char *argv[])
         return -1;
     }
 
-    // -------------------------
-    // TODO: Open a pipe
-    // -------------------------
     int fd[2];
     if (pipe(fd) == -1) {
         return -1;
