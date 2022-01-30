@@ -66,7 +66,7 @@ Lines *findLines(const char *haystack, size_t len)
     {
         if (haystack[j] == '\n')
         {
-            appendLine(&lines, (Line){haystack + i, j - i - 1});
+            appendLine(&lines, (Line){.start = haystack + i, .len = j - i - 1});
             i = j + 1;
         }
     }
@@ -78,12 +78,26 @@ Lines *findLines(const char *haystack, size_t len)
  */
 Line *findLineContaining(Lines *l, const char *match)
 {
-    (void)l;
-    (void)match;
-    /* TODO: Use binary search to find the line that contains `match`. */
+    size_t lower = 0, upper = l->len;
+    size_t middle;
+    while (lower <= upper)
+    {
+        middle = (upper + lower) / 2;
+        if (match >= l->lines[middle].start && match < l->lines[middle].start + l->lines[middle].len)
+        {
+            return &l->lines[middle];
+        }
+        else if (match < l->lines[middle].start)
+        {
+            upper = middle - 1;
+        }
+        else
+        {
+            lower = middle + 1;
+        }
+    }
     return NULL;
 }
-
 typedef struct _LineSearcherState
 {
     Lines **lines;
@@ -108,9 +122,32 @@ void *needleSearcher(void *arg)
 {
     NeedleSearcherState *state = arg;
     NeedleSearcherResult *results = NULL;
+    NeedleSearcherResult *results_tail = NULL;
 
-    /* TODO: Find all substrings by calling findFirstSubstring() and collect
-     * them in a linked list with NeedleSearcherResult. */
+    ssize_t offset;
+    const char *haystack = state->haystack;
+    size_t len = state->len;
+    size_t needle_len = strlen(state->needle);
+
+    // Find and collect all substrings.
+    while ((offset = findFirstSubstring(state->needle, haystack, len)) != -1)
+    {
+        NeedleSearcherResult *r = malloc(sizeof(NeedleSearcherResult));
+        r->match = haystack + offset;
+        r->next = NULL;
+        // no overlapping matches
+        haystack += offset + needle_len;
+        len -= offset + needle_len;
+        if (results_tail)
+        {
+            results_tail->next = r;
+        }
+        else
+        {
+            results = r;
+        }
+        results_tail = r;
+    }
 
     // Wait for line information to be ready.
     pthread_mutex_lock(state->mutex);
@@ -122,8 +159,10 @@ void *needleSearcher(void *arg)
     // locking is necessary.
     pthread_mutex_unlock(state->mutex);
 
-    /* TODO: Add line information to the results by calling findLineContaining(). */
-
+    for (results_tail = results; results_tail; results_tail = results_tail->next)
+    {
+        results_tail->line = findLineContaining(*state->lines, results_tail->match);
+    }
     return results;
 }
 

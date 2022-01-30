@@ -5,6 +5,7 @@
 #include <pthread.h>
 
 /* Set to 1 to get more verbose output */
+#define EBR_DEBUG 0
 #define SCHED_DEBUG 0
 
 /*
@@ -27,8 +28,14 @@ volatile size_t ebr_epoch;
 volatile size_t ebr_reservations[KLT_COUNT];
 // Per-thread counter for triggering periodic operations.
 __thread size_t ebr_counter;
-
-// TODO: Define a per-thread linked-list for retired allocations.
+// Per-thread linked-list with retired allocations.
+typedef struct _ebr_list
+{
+    void *ptr;
+    size_t epoch;
+    struct _ebr_list *next;
+} ebr_list;
+__thread ebr_list *ebr_retired = NULL;
 
 // maximum epoch
 #define EBR_EPOCH_MAX SIZE_MAX
@@ -40,20 +47,60 @@ __thread size_t ebr_counter;
 // Private function: empty the retired list
 void ebr_empty()
 {
-    // TODO: Implement after Figure 2 in the paper.
+    size_t max_safe_epoch = EBR_EPOCH_MAX;
+    for (int i = 0; i < KLT_COUNT; i++)
+    {
+        if (ebr_reservations[i] < max_safe_epoch)
+        {
+            max_safe_epoch = ebr_reservations[i];
+        }
+    }
+#if EBR_DEBUG
+    size_t freed = 0, remaining = 0;
+#endif
+    for (ebr_list **prev = &ebr_retired, *l = ebr_retired; l;)
+    {
+        if (l->epoch < max_safe_epoch)
+        {
+            free(l->ptr);
+            *prev = l->next;
+            free(l);
+            l = *prev;
+#if EBR_DEBUG
+            freed++;
+#endif
+        }
+        else
+        {
+            prev = &l->next;
+            l = l->next;
+#if EBR_DEBUG
+            remaining++;
+#endif
+        }
+    }
+#if EBR_DEBUG
+    fprintf(stderr, "KLT %d: ebr_empty: freed %zu, remaining %zu, epoch %zu, safe %zu\n", _current_klt, freed, remaining, ebr_epoch, max_safe_epoch);
+#endif
 }
 
 // Public function: retire a block so that it is freed later.
 void ebr_retire(void *ptr)
 {
-    (void) ptr;
-    // TODO: Implement after Figure 2 in the paper.
+    // prepend to ebr_retired list
+    ebr_list *node = malloc(sizeof(ebr_list));
+    node->ptr = ptr;
+    node->epoch = ebr_epoch;
+    node->next = ebr_retired;
+    ebr_retired = node;
 
     ebr_counter++;
-    if (ebr_counter % EBR_EPOCH_FREQ == 0) {
+    if (ebr_counter % EBR_EPOCH_FREQ == 0)
+    {
         __sync_fetch_and_add(&ebr_epoch, 1);
     }
-    if (ebr_counter % EBR_EMPTY_FREQ == 0) {
+    if (ebr_counter % EBR_EMPTY_FREQ == 0)
+    {
         ebr_empty();
     }
 }
@@ -71,16 +118,19 @@ void ebr_end_op()
 /* Lock-free queue implementation */
 /* ============================== */
 
-void initQueue(Queue *queue) {
-    QueueItem *head = (QueueItem *) malloc(sizeof(QueueItem));
+void initQueue(Queue *queue)
+{
+    QueueItem *head = (QueueItem *)malloc(sizeof(QueueItem));
     head->next = NULL;
     queue->tail = queue->head = head;
 }
 
-void freeQueue(Queue *queue) {
+void freeQueue(Queue *queue)
+{
     // Remove all regular items.
     Thread *t;
-    do {
+    do
+    {
         t = dequeue(queue);
     } while (t);
     // Free the head.
@@ -95,8 +145,9 @@ void enqueue(Queue *queue, Thread *thread)
 {
     assert(queue != NULL);
 
-    QueueItem *item = (QueueItem *) malloc(sizeof(QueueItem));
-    if (item == NULL) {
+    QueueItem *item = (QueueItem *)malloc(sizeof(QueueItem));
+    if (item == NULL)
+    {
         return;
     }
 
@@ -105,10 +156,31 @@ void enqueue(Queue *queue, Thread *thread)
 
     ebr_start_op();
 
-    // TODO: Implement as lock-free algorithm.
-
-    queue->tail->next = item;
-    queue->tail = item;
+    QueueItem *tail, *next;
+    for (;;)
+    {
+        tail = queue->tail;
+        next = tail->next;
+        // Was tail correct?
+        if (next == NULL)
+        {
+            // Yes: try to append the new item.
+            if (__sync_bool_compare_and_swap(&tail->next, next, item))
+            {
+                break;
+            }
+            // Someone else modified tail->next, try again.
+        }
+        else
+        {
+            // tail was not correct: someone else already updated tail->next,
+            // but did not update tail yet. Try to update tail, then try again.
+            // This is important so that we don't block if another thread was
+            // preempted after the break; above, but before updating tail.
+            __sync_bool_compare_and_swap(&queue->tail, tail, next);
+        }
+    }
+    __sync_bool_compare_and_swap(&queue->tail, tail, item);
 
     ebr_end_op();
 }
@@ -123,38 +195,60 @@ Thread *dequeue(Queue *queue)
 
     ebr_start_op();
 
-    // TODO: Implement as lock-free algorithm.
+    QueueItem *head, *tail, *next;
+    Thread *thread;
+    for (;;)
+    {
+        // head is the dummy element, next is the real queue head.
+        head = queue->head;
+        tail = queue->tail;
+        next = head->next;
 
-    QueueItem *head = queue->head;
-    QueueItem *next = head->next;
-    if (next == NULL) {
-        return NULL;
+        // A concurrent dequeue() could have changed queue->head, making the next pointer invalid.
+        if (head == queue->head)
+        {
+            if (head == tail)
+            {
+                // Queue could be empty, or tail falling behind.
+                if (next == NULL)
+                {
+                    ebr_end_op();
+                    return NULL;
+                }
+                // There is a concurrent enqueue() - try to update tail.
+                __sync_bool_compare_and_swap(&queue->tail, tail, next);
+            }
+            else
+            {
+                thread = next->thread;
+                if (__sync_bool_compare_and_swap(&queue->head, head, next))
+                {
+                    break;
+                }
+            }
+        }
     }
-    Thread *thread = next->thread;
-    queue->head = next;
-
     ebr_end_op();
-
-    // TODO: Use ebr_retire() here.
-    free(head);
-
+    ebr_retire(head);
     return thread;
 }
 
 /* Hybrid Scheduler implementation */
 /* =============================== */
 
-typedef enum _ThreadState {
+typedef enum _ThreadState
+{
     STATE_INVALID = 0,
 
-    STATE_READY,      // The thread is ready and should be on a ready queue for
-                      //   selection by the scheduler
-    STATE_RUNNING,    // The thread is running and should not be on a ready queue
-    STATE_WAITING,    // The thread is blocked and should not be on a ready queue
-    STATE_FINISHED,   // The thread has finished execution and needs to be cleaned up
+    STATE_READY,    // The thread is ready and should be on a ready queue for
+                    //   selection by the scheduler
+    STATE_RUNNING,  // The thread is running and should not be on a ready queue
+    STATE_WAITING,  // The thread is blocked and should not be on a ready queue
+    STATE_FINISHED, // The thread has finished execution and needs to be cleaned up
 } ThreadState;
 
-struct _Thread {
+struct _Thread
+{
     int threadId;
     ThreadState state;
     /*
@@ -210,10 +304,11 @@ int getThreadId() { return _current_thread->threadId; }
 static Thread *allocThread(int priority)
 {
     Thread *thread = malloc(sizeof(Thread));
-    if (thread == NULL) return NULL;
+    if (thread == NULL)
+        return NULL;
 
     thread->threadId = __sync_fetch_and_add(&_next_thread_id, 1);
-    thread->state    = STATE_WAITING;
+    thread->state = STATE_WAITING;
     thread->priority = priority;
 
     return thread;
@@ -231,18 +326,20 @@ static void freeThread(Thread *thread)
 
 static void *_initKLT(void *param)
 {
-    _current_klt = (intptr_t) param;
+    _current_klt = (intptr_t)param;
 
     _current_thread = allocThread(0);
     _current_thread->state = STATE_RUNNING;
 #if SCHED_DEBUG
-    fprintf(stderr, "KLT %d: _initKLT -> thread %d\n", getKLT(),  _current_thread->threadId);
+    fprintf(stderr, "KLT %d: _initKLT -> thread %d\n", getKLT(), _current_thread->threadId);
 #endif
 
     // Spin and reclaim finished threads until all threads are finished.
-    while (_active_threads > 0) {
+    while (_active_threads > 0)
+    {
         Thread *finished = dequeue(&_finished_threads);
-        if (finished) {
+        if (finished)
+        {
             __sync_fetch_and_sub(&_active_threads, 1);
             freeThread(finished);
             continue; // check for more threads to free
@@ -261,11 +358,13 @@ static void *_initKLT(void *param)
 void initScheduler()
 {
     // Initialize EBR reservations.
-    for (int i = 0; i < KLT_COUNT; i++) {
+    for (int i = 0; i < KLT_COUNT; i++)
+    {
         ebr_reservations[i] = EBR_EPOCH_MAX;
     }
     // Initialize scheduling queues.
-    for (int i = 0; i <= HIGHEST_PRIORITY; i++) {
+    for (int i = 0; i <= HIGHEST_PRIORITY; i++)
+    {
         initQueue(&_queues[i]);
     }
     initQueue(&_finished_threads);
@@ -277,8 +376,9 @@ void initScheduler()
 void startScheduler()
 {
     // Start kernel-level pthreads.
-    for (int i = 0; i < KLT_COUNT; i++) {
-        pthread_create(&_klt_handles[i], NULL, _initKLT, (void *)(intptr_t) i);
+    for (int i = 0; i < KLT_COUNT; i++)
+    {
+        pthread_create(&_klt_handles[i], NULL, _initKLT, (void *)(intptr_t)i);
     }
 }
 
@@ -287,7 +387,8 @@ void startScheduler()
  */
 void joinScheduler()
 {
-    for (int i = 0; i < KLT_COUNT; i++) {
+    for (int i = 0; i < KLT_COUNT; i++)
+    {
         pthread_join(_klt_handles[i], NULL);
     }
 }
@@ -304,7 +405,7 @@ static void _enqueueThread(Thread *thread)
 /*
  * Called whenever a waiting thread gets ready to run.
  */
-void onThreadReady(Thread *thread)
+static void onThreadReady(Thread *thread)
 {
     assert(thread->state == STATE_WAITING);
 
@@ -315,7 +416,7 @@ void onThreadReady(Thread *thread)
 /*
  * Called whenever a running thread needs to wait.
  */
-void onThreadWaiting(Thread *thread)
+static void onThreadWaiting(Thread *thread)
 {
     assert(thread->state == STATE_RUNNING);
 
@@ -326,7 +427,8 @@ void onThreadWaiting(Thread *thread)
 static Thread *_dequeueThread(int priority)
 {
     assert(priority <= HIGHEST_PRIORITY);
-    if (priority < 0) {
+    if (priority < 0)
+    {
         // Idle thread if priority is less than 0. This will abort recursion.
         return NULL;
     }
@@ -334,7 +436,8 @@ static Thread *_dequeueThread(int priority)
     Queue *queue = &_queues[priority];
     Thread *dequeued = dequeue(queue);
 
-    if (dequeued == NULL) {
+    if (dequeued == NULL)
+    {
         return _dequeueThread(priority - 1);
     }
     // Schedule a thread with the current priority.
@@ -361,30 +464,35 @@ void contextSwitch(Queue *queue)
     // This will update _currentThread to the next thread!
     Thread *prevThread = _current_thread;
     Thread *nextThread = scheduleNextThread();
-    if (nextThread == NULL) {
-        if (prevThread->state == STATE_RUNNING) {
+    if (nextThread == NULL)
+    {
+        if (prevThread->state == STATE_RUNNING)
+        {
             // There is no other thread to run, ignore yield().
             // Note that we will always fall back to the _initKLT() threads this way.
             return;
         }
         // We cannot continue running the current thread, try again until one becomes available.
-        do { nextThread = scheduleNextThread(); } while (nextThread == NULL);
+        do
+        {
+            nextThread = scheduleNextThread();
+        } while (nextThread == NULL);
     }
     _current_thread = nextThread;
 
 #if SCHED_DEBUG
     int klt = getKLT();
     fprintf(stderr, "KLT %d: Switch from thread %d with sp near %p\n",
-        klt, prevThread->threadId, &prevThread->stack);
+            klt, prevThread->threadId, &prevThread->stack);
     fprintf(stderr, "KLT %d: Switch to thread %d with sp=%p\n",
-        klt, _current_thread->threadId, _current_thread->currentSP);
+            klt, _current_thread->threadId, _current_thread->currentSP);
 #endif
 
     _current_thread->state = STATE_RUNNING;
     assert(_current_thread->currentSP != NULL);
 
     // Do the context switch
-    __asm__ __volatile__ (
+    __asm__ __volatile__(
         "movq  %[prevTh], %%rax\n\t" // save prevThread from old stack
         "movq  %[queue], %%rcx\n\t"  // save queue from old stack
         "pushq %%rbp\n\t"            // Push registers to old stack
@@ -397,7 +505,7 @@ void contextSwitch(Queue *queue)
         "movq  %%rsp, %[prevSp]\n\t" // Store current stack pointer
         "movq  %[newSp], %%rsp\n\t"  // Switch to the new stack
 
-        "popq  %%r15\n\t"            // Pop registers from new stack
+        "popq  %%r15\n\t" // Pop registers from new stack
         "popq  %%r14\n\t"
         "popq  %%r13\n\t"
         "popq  %%r12\n\t"
@@ -406,11 +514,12 @@ void contextSwitch(Queue *queue)
         "movq  %%rax, %[prevTh]\n\t" // restore prevThread to new stack
         "movq  %%rcx, %[queue]\n\t"  // restore queue to new stack
 
-        : /* output */  [prevSp]"=m"(prevThread->currentSP), [prevTh]"+m"(prevThread), [queue]"+m"(queue)
-        : /* input */   [newSp]"m"(_current_thread->currentSP)
+        : /* output */[prevSp] "=m"(prevThread->currentSP), [prevTh] "+m"(prevThread), [queue] "+m"(queue)
+        : /* input */[newSp] "m"(_current_thread->currentSP)
         : /* clobber */ "rax", "rcx", "cc", "memory");
 
-    if (prevThread->state == STATE_RUNNING) {
+    if (prevThread->state == STATE_RUNNING)
+    {
         prevThread->state = STATE_READY;
     }
     enqueue(queue, prevThread);
@@ -439,14 +548,16 @@ static void _threadFinished()
  */
 int startThread(void (*func)(void), int priority)
 {
-    if (func == NULL) {
+    if (func == NULL)
+    {
         return -1;
     }
 
     // Find a thread structure in our pre-allocated thread array, that we did
     // not use, yet.
     Thread *thread = allocThread(priority);
-    if (thread == NULL) return -1;
+    if (thread == NULL)
+        return -1;
 
     // Stacks grow from high addresses to low addresses. The stack thus
     // effectively starts at the end of the allocated memory area and
@@ -455,7 +566,7 @@ int startThread(void (*func)(void), int priority)
     // pointers. A pointer has the right size (e.g., 32 or 64 bits) to
     // hold a full CPU register and can receive function pointers
     // without casting. stackTop is thus a pointer to pointers.
-    void **stackTop = (void**)(thread->stack + STACK_SIZE);
+    void **stackTop = (void **)(thread->stack + STACK_SIZE);
 
     // We need to write the values to the stack in the reverse order
     // they will be needed when yield() switches to this stack.
@@ -487,7 +598,7 @@ int startThread(void (*func)(void), int priority)
     // We initialized the stack and the thread is ready to run.
     // After setting STATE_READY, the thread is eligible to dispatching
     thread->currentSP = stackTop;
-    thread->state     = STATE_READY;
+    thread->state = STATE_READY;
 
     __sync_fetch_and_add(&_active_threads, 1);
     _enqueueThread(thread);
@@ -498,10 +609,13 @@ int startThread(void (*func)(void), int priority)
 /* Mutex implementation */
 /* ==================== */
 
-typedef struct _mutex {
+typedef struct _mutex
+{
     // Threads waiting on the mutex.
     Queue waiting;
-    // TODO: Declare lock variable.
+    // Number of threads that are trying to enter the lock or are in the
+    // critical section.
+    size_t num_in_lock;
 } mutex;
 
 /*
@@ -511,7 +625,7 @@ mutex *mutexNew()
 {
     mutex *m = malloc(sizeof(mutex));
     initQueue(&m->waiting);
-    // TODO: Initialize lock variable.
+    m->num_in_lock = 0;
     return m;
 }
 
@@ -520,42 +634,48 @@ mutex *mutexNew()
  */
 void mutexLock(mutex *m)
 {
-    (void) m;
-    // TODO: Implement mutexLock()
-    // - Try to acquire the lock by atomically changing the lock variable.
-    // - If the mutex was already locked, suspend the current thread by running
-    //     onThreadWaiting(_current_thread);
-    //     contextSwitch(&m->waiting);
-    // - Make sure that there is no race condition between checking the lock,
-    //   adding the thread to the queue, and the wakup functionality in
-    //   mutexUnlock().
+    // First, register that we are going to wait.
+    size_t prev_num = __sync_fetch_and_add(&m->num_in_lock, 1);
+    // If there were other waiters, we need to block the thread.
+    if (prev_num > 0)
+    {
+        onThreadWaiting(_current_thread);
+        contextSwitch(&m->waiting);
+        // Once the previous lock holder unblocks this thread, we have acquired
+        // the lock.
+    }
+    // We locked the mutex successfully.
 }
 
-/*
- * Try to lock the mutex. Return 0 on success, and a non-zero value otherwise.
- */
 int mutexTryLock(mutex *m)
 {
-    (void) m;
-    // TODO: Implement mutexTryLock()
-    // - Try to acquire the lock by atomically changing the lock variable.
-    // - Return immediately, even if the mutex could not be locked.
-    return 1;
+    // Only increment num_in_lock if there is no waiter.
+    return !__sync_bool_compare_and_swap(&m->num_in_lock, 0, 1);
 }
 
 void mutexUnlock(mutex *m)
 {
-    (void) m;
-    // TODO: Implement mutexUnlock()
-    // - Free the lock by atomically changing the lock variable.
-    // - Check if there are any other threads waiting on the mutex. Wake them
-    //   up by running
-    //     onThreadReady(thread);
-    // - Make sure that there is no race condition as described in mutexLock().
+    // We need to capture the previous value to avoid a race condition with
+    // mutexTryLock() if we decrement to zero here.
+    size_t prev_num = __sync_fetch_and_sub(&m->num_in_lock, 1);
+    // Unblock the next thread in the queue, if there is one. This thread then
+    // has automatically acquired the lock. We have to check the waiting queue
+    // in a loop to avoid a race condition: we might check the queue after
+    // another thread failed to lock the mutex, but before it could add itself
+    // to the queue.
+    if (prev_num > 1)
+    {
+        Thread *t;
+        do
+        {
+            t = dequeue(&m->waiting);
+        } while (!t);
+        onThreadReady(t);
+    }
 }
 
-void mutexFree(mutex *m) {
+void mutexFree(mutex *m)
+{
     freeQueue(&m->waiting);
-    // TODO: Free additional fields, if necessary
     free(m);
 }
