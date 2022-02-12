@@ -13,9 +13,16 @@
  */
 FILE *openAtOffset(const char *filename, long offset)
 {
-    // TODO
-    (void) filename; (void) offset;
-    return NULL;
+    FILE *stream = fopen(filename, "r");
+    if (stream == NULL)
+    {
+        return NULL;
+    }
+    if (fseek(stream, offset, SEEK_SET) < 0)
+    {
+        return NULL;
+    }
+    return stream;
 }
 
 /*
@@ -24,9 +31,20 @@ FILE *openAtOffset(const char *filename, long offset)
  */
 char *allocateAndRead(FILE *file, size_t len)
 {
-    // TODO
-    (void) file; (void) len;
-    return NULL;
+    char *buffer = malloc(len * sizeof(char));
+    if (buffer == NULL)
+    {
+        return NULL;
+    }
+    if (fread(buffer, sizeof(char), len, file) == len * sizeof(char))
+    {
+        return buffer;
+    }
+    else
+    {
+        free(buffer);
+        return NULL;
+    }
 }
 
 /*
@@ -34,9 +52,12 @@ char *allocateAndRead(FILE *file, size_t len)
  */
 int64_t getFileSize(const char *filename)
 {
-    // TODO
-    (void) filename;
-    return -1;
+    struct stat st;
+    if (stat(filename, &st) < 0)
+    {
+        return -1;
+    }
+    return st.st_size;
 }
 
 /*
@@ -49,8 +70,10 @@ ssize_t findFirstSubstring(const char *needle, const char *haystack, size_t len)
     size_t needle_len = strlen(needle);
     if (len < needle_len)
         return -1;
-    for (i = 0; i <= len - needle_len; i++) {
-        for (j = 0; needle[j]; j++) {
+    for (i = 0; i <= len - needle_len; i++)
+    {
+        for (j = 0; needle[j]; j++)
+        {
             if (needle[j] != haystack[i + j])
                 break;
         }
@@ -62,12 +85,14 @@ ssize_t findFirstSubstring(const char *needle, const char *haystack, size_t len)
     return -1;
 }
 
-typedef struct _Line {
+typedef struct _Line
+{
     char *start;
     size_t len;
 } Line;
 
-typedef struct _Lines {
+typedef struct _Lines
+{
     size_t len, cap;
     Line lines[];
 } Lines;
@@ -89,7 +114,8 @@ Lines *newLines()
  */
 void appendLine(Lines **lines, Line l)
 {
-    if ((*lines)->len == (*lines)->cap) {
+    if ((*lines)->len == (*lines)->cap)
+    {
         size_t new_cap = (*lines)->cap * 2;
         *lines = realloc(*lines, sizeof(Lines) + new_cap * sizeof(Line));
         (*lines)->cap = new_cap;
@@ -108,14 +134,16 @@ Lines *findLines(FILE *file, size_t len)
         return NULL;
     Lines *lines = newLines();
     size_t i, start = 0;
-    for (i = 0; i < len; i++) {
-        if (haystack[i] == '\n') {
-            appendLine(&lines, (Line) {.start = haystack + start, .len = i - start + 1});
+    for (i = 0; i < len; i++)
+    {
+        if (haystack[i] == '\n')
+        {
+            appendLine(&lines, (Line){.start = haystack + start, .len = i - start + 1});
             start = i + 1;
         }
     }
     if (start < len)
-        appendLine(&lines, (Line) {.start = haystack + start, .len = len - start});
+        appendLine(&lines, (Line){.start = haystack + start, .len = len - start});
     return lines;
 }
 
@@ -127,21 +155,28 @@ Line *findLineContaining(Lines *l, size_t offset)
     size_t lower = 0, upper = l->len;
     size_t middle, loff;
     char *first = l->lines[0].start;
-    while (lower <= upper) {
+    while (lower <= upper)
+    {
         middle = (upper + lower) / 2;
         loff = l->lines[middle].start - first;
-        if (offset >= loff && offset < loff + l->lines[middle].len) {
+        if (offset >= loff && offset < loff + l->lines[middle].len)
+        {
             return &l->lines[middle];
-        } else if (offset < loff) {
+        }
+        else if (offset < loff)
+        {
             upper = middle - 1;
-        } else {
+        }
+        else
+        {
             lower = middle + 1;
         }
     }
     return NULL;
 }
 
-typedef struct _LineSearcherState {
+typedef struct _LineSearcherState
+{
     Lines **lines;
     FILE *file;
     size_t len;
@@ -158,7 +193,8 @@ void *lineSearcher(void *arg)
     return NULL;
 }
 
-typedef struct _NeedleSearcherState {
+typedef struct _NeedleSearcherState
+{
     const char *needle;
     FILE *file;
     size_t len, offset;
@@ -171,7 +207,8 @@ typedef struct _NeedleSearcherState {
     Lines **lines;
 } NeedleSearcherState;
 
-typedef struct _NeedleSearcherResult {
+typedef struct _NeedleSearcherResult
+{
     size_t offset;
     const Line *line;
     struct _NeedleSearcherResult *next;
@@ -189,7 +226,8 @@ void *needleSearcher(void *arg)
     ssize_t offset;
     size_t len = state->len;
     char *haystack = allocateAndRead(state->file, len);
-    if (haystack == NULL) {
+    if (haystack == NULL)
+    {
         perror("needle searcher failed to read file");
         state->have_errors = true;
         return NULL;
@@ -198,16 +236,20 @@ void *needleSearcher(void *arg)
     size_t needle_len = strlen(state->needle);
 
     // Find and collect all substrings.
-    while ((offset = findFirstSubstring(state->needle, hay_off, len)) != -1) {
+    while ((offset = findFirstSubstring(state->needle, hay_off, len)) != -1)
+    {
         NeedleSearcherResult *r = malloc(sizeof(NeedleSearcherResult));
         r->offset = offset + (hay_off - haystack);
         r->next = NULL;
         // no overlapping matches
         hay_off += offset + needle_len;
         len -= offset + needle_len;
-        if (results_tail) {
+        if (results_tail)
+        {
             results_tail->next = r;
-        } else {
+        }
+        else
+        {
             results = r;
         }
         results_tail = r;
@@ -217,7 +259,8 @@ void *needleSearcher(void *arg)
 
     // Wait for line information to be ready.
     pthread_mutex_lock(state->mutex);
-    while (!*state->lines_valid) {
+    while (!*state->lines_valid)
+    {
         pthread_cond_wait(state->cond, state->mutex);
     }
     // Once the lines are valid, there are no more writes to them, so no
@@ -225,13 +268,13 @@ void *needleSearcher(void *arg)
     pthread_mutex_unlock(state->mutex);
 
     // Add line information to the results.
-    for (NeedleSearcherResult *r = results; r; r = r->next) {
+    for (NeedleSearcherResult *r = results; r; r = r->next)
+    {
         r->line = findLineContaining(*state->lines, state->offset + r->offset);
     }
 
     return results;
 }
-
 
 /*
  * Perform a parallel search for `needle` in file `filename`, printing all matching lines.
@@ -257,10 +300,11 @@ int parallelFileSearch(const char *needle, const char *filename, int threads)
     bool lines_valid = false;
     NeedleSearcherState *state = malloc(sizeof(NeedleSearcherState) * threads);
     pthread_t *searcher_threads = malloc(sizeof(pthread_t) * threads);
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads; i++)
+    {
         // overlap by needle_len - 1
         size_t offset = i * file_size / threads - (i > 0 ? needle_len - 1 : 0);
-        state[i] = (NeedleSearcherState) {
+        state[i] = (NeedleSearcherState){
             .needle = needle,
             .file = openAtOffset(filename, offset),
             .len = file_size / threads + (i > 0 ? needle_len - 1 : 0),
@@ -284,16 +328,18 @@ int parallelFileSearch(const char *needle, const char *filename, int threads)
 
     int retval = 0;
     char *first_line = lines->len ? lines->lines[0].start : NULL;
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads; i++)
+    {
         NeedleSearcherResult *result;
-        pthread_join(searcher_threads[i], (void **) &result);
+        pthread_join(searcher_threads[i], (void **)&result);
 
         if (state[i].have_errors)
             retval = -1;
 
-        for (NeedleSearcherResult *r = result; r; r = result) {
+        for (NeedleSearcherResult *r = result; r; r = result)
+        {
             size_t lineno = r->line - lines->lines;
-            printf("%zu:%zu\t%.*s\n", lineno, state[i].offset + r->offset - (r->line->start - first_line), (int) r->line->len - 1, r->line->start);
+            printf("%zu:%zu\t%.*s\n", lineno, state[i].offset + r->offset - (r->line->start - first_line), (int)r->line->len - 1, r->line->start);
             result = r->next;
             free(r);
         }
@@ -305,4 +351,3 @@ int parallelFileSearch(const char *needle, const char *filename, int threads)
     free(searcher_threads);
     return retval;
 }
-
