@@ -178,7 +178,6 @@ int startThread(void (*func)(void)) {
 
       // ------- Implement thread stack initialization here ---------
 
-      // TODO: prepare the new stack, adjust stackTop.
       // Remember that stackTop-- decreases the stack pointer by 8 bytes.
       stackTop--;
       *stackTop = _parkThread;

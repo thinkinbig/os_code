@@ -38,87 +38,77 @@
 // The present bit.
 #define PAGE_PRESENT_MASK 0x01
 
-typedef enum {
-    ACCESS_READ, ACCESS_WRITE
-} ReadWrite;
+typedef enum { ACCESS_READ, ACCESS_WRITE } ReadWrite;
 
-typedef enum {
-    USER_MODE, KERNEL_MODE
-} PrivilegeLevel;
+typedef enum { USER_MODE, KERNEL_MODE } PrivilegeLevel;
 
 // The first-level page table - the page directory.
 // The table must be 4KiB aligned. The size of this table is 8KiB. We use 64
 // bits per entry to be able to test this on 64 bit systems. On 32 bit systems,
 // 32 bits would be sufficient.
 typedef struct {
-    // Bits used in our implementation:
-    // Bits 12 - 63: The address of the page table.
-    // Bit 0: This page table is present.
-    // All other bits reserved.
-    uint64_t entries[ENTRIES_PER_TABLE];
+  // Bits used in our implementation:
+  // Bits 12 - 63: The address of the page table.
+  // Bit 0: This page table is present.
+  // All other bits reserved.
+  uint64_t entries[ENTRIES_PER_TABLE];
 } PageDirectory;
 
 // Bits that should be preserved on a swap out operation
-#define PRESERVED_BITS_ON_SWAP \
-    (PAGE_ACCESSED_MASK | PAGE_USERMODE_MASK | PAGE_READWRITE_MASK)
+#define PRESERVED_BITS_ON_SWAP                                                 \
+  (PAGE_ACCESSED_MASK | PAGE_USERMODE_MASK | PAGE_READWRITE_MASK)
 
 // The second-level page table.
 // The table must be 4KiB aligned.
 typedef struct {
-    // Bits used in our implementation:
-    // Bits 12 - 31: The physical frame to which this page is mapped.
-    // Bit 9: This page has been swapped out
-    // Bit 6: The accessed bit.
-    // Bit 2: This page is accessible in user mode.
-    // Bit 1: This page is writable.
-    // Bit 0: This page is present.
-    uint32_t entries[ENTRIES_PER_TABLE];
+  // Bits used in our implementation:
+  // Bits 12 - 31: The physical frame to which this page is mapped.
+  // Bit 9: This page has been swapped out
+  // Bit 6: The accessed bit.
+  // Bit 2: This page is accessible in user mode.
+  // Bit 1: This page is writable.
+  // Bit 0: This page is present.
+  uint32_t entries[ENTRIES_PER_TABLE];
 } PageTable;
 
 // Converts a pointer to an integer without compiler warnings.
-static inline uint64_t pointerToInt(void* ptr)
-{
-    return (uint64_t)((intptr_t)ptr);
+static inline uint64_t pointerToInt(void *ptr) {
+  return (uint64_t)((intptr_t)ptr);
 }
 
 // Converts an integer to a pointer without compiler warnings.
-static inline void* intToPointer(uint64_t ptr)
-{
-    return (void*)((intptr_t)ptr);
+static inline void *intToPointer(uint64_t ptr) {
+  return (void *)((intptr_t)ptr);
 }
 
 // Returns the base address of the current frame
 // (i.e., the address of the first byte in the frame)
-static inline uint32_t _getVirtualBase(uint32_t address)
-{
-    return address & BASE_MASK;
+static inline uint32_t _getVirtualBase(uint32_t address) {
+  return address & BASE_MASK;
 }
 
 // Returns the index in the page directory for the given address.
-static inline uint32_t _getPageDirectoryIndex(uint32_t address)
-{
-    return address >> (OFFSET_BITS + BITS_PER_ENTRY);
+static inline uint32_t _getPageDirectoryIndex(uint32_t address) {
+  return address >> (OFFSET_BITS + BITS_PER_ENTRY);
 }
 
 // Returns the index in the second level page table for the given address.
-static inline uint32_t _getPageTableIndex(uint32_t address)
-{
-    return (address >> OFFSET_BITS) & ENTRY_MASK;
+static inline uint32_t _getPageTableIndex(uint32_t address) {
+  return (address >> OFFSET_BITS) & ENTRY_MASK;
 }
 
 // Returns the offset for the given address.
-static inline uint32_t _getOffset(uint32_t address)
-{
-    return address & OFFSET_MASK;
+static inline uint32_t _getOffset(uint32_t address) {
+  return address & OFFSET_MASK;
 }
 
 void setPageDirectory(PageDirectory *directory);
 
 int mapPage(uint32_t virtualBase, uint32_t physicalBase, ReadWrite accessMode,
-        PrivilegeLevel privileges);
+            PrivilegeLevel privileges);
 
 int translatePageTable(uint32_t *address, ReadWrite accessMode,
-        PrivilegeLevel privileges);
+                       PrivilegeLevel privileges);
 
 void flushTLB();
 int addToTLB(uint32_t virtualBase, uint32_t pageTableEntry);
@@ -135,7 +125,6 @@ uint32_t _getPte(uint32_t virtualBase);
 
 // Sets the page table entry, allocates a new table if required.
 int _setPte(uint32_t virtualBase, uint32_t pte);
-
 
 /* Necessary for test_swapOut_disk_offset */
 ALLOW_OVERRIDE
